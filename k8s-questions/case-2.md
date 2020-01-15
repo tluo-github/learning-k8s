@@ -58,6 +58,16 @@ nsenter --net=/var/run/docker/netns/421bdb2accf1 ifconfig -a
 
 上述的命令，到 var/run/docker/netns/421bdb2accf1 这个network namespace里执行了 ifconfig -a 命令。于是我们可以用下面 命令来遍历所有的network namespace。
 
+```
+$ ls /var/run/docker/netns | xargs -I {} nsenter --net=/var/run/docker/netns/{} ip addr 
+```
+
+然后，我们发现了比较诡异的事情。
+
+* **10.233.14.145** 我们查到了这个IP，说明，docker的namespace下还有这个IP。
+
+* **10.233.14.137**，这个IP没有在docker的network namespace下查到。
+
 
 
 
