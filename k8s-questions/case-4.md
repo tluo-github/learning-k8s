@@ -189,6 +189,185 @@ TcpExtListenOverflows           12178939              0.0
 TcpExtListenDrops               12247395              0.0
 ```
 
+另外，对于低版本内核，当 accept queue 满了，并不会完全丢弃 SYN 包，而是对 SYN 限速。把内核源码切到 3.10 版本，看 **net/ipv4/tcp_ipv4.c**中**tcp_v4_conn_request**函数:
+```
+/* Accept backlog is full. If we have already queued enough
+ * of warm entries in syn queue, drop request. It is better than
+ * clogging syn queue with openreqs with exponentially increasing
+ * timeout.
+ */
+if (sk_acceptq_is_full(sk) && inet_csk_reqsk_queue_young(sk) > 1) {
+        NET_INC_STATS_BH(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
+        goto drop;
+}
+```
+
+其中**inet_csk_reqsk_queue_young(sk) > 1**的条件实际就是用于限速，仿佛在对 client 说: 哥们，你慢点！我的 accept queue 都满了，即便咱们握手成功，连接也可能放不进去呀。
+
+
+#### 八、回到问题上来
+
+总结之前观察到两个现象：
+* 容器内抓包发现收到 client 的 SYN，但 nginx 没回包。
+* 通过netstat -s发现有溢出和丢包的统计 (ListenOverflows与ListenDrops)。
+
+根据之前的分析，我们可以推测是 syn queue 或 accept queue 满了。
+
+先检查下 syncookies 配置:
+
+```
+
+$ cat /proc/sys/net/ipv4/tcp_syncookies
+1
+```
+
+确认启用了 syncookies，所以 syn queue 大小没有限制，不会因为 syn queue 满而丢包，并且即便没开启 syncookies，syn queue 有大小限制，队列满了也不会使**ListenOverflows**计数器 +1。
+
+
+从计数器结果来看，**ListenOverflows**和**ListenDrops**的值差别不大，所以推测很有可能是 accept queue 满了，因为当 accept queue 满了会丢 SYN 包，并且同时将 **ListenOverflows**与**ListenDrops**计数器分别 +1。
+
+
+如何验证 accept queue 满了呢？可以在容器的 netns 中执行**ss -lnt**看下:
+
+```
+$ ss -lnt
+State      Recv-Q Send-Q Local Address:Port                Peer Address:Port
+LISTEN     129    128                *:80                             *:*
+```
+
+通过这条命令我们可以看到当前 netns 中监听 tcp 80 端口的 socket，**Send-Q** 为 128，**Recv-Q** 为 129。
+
+什么意思呢？通过调研得知：
+* 对于 **LISTEN** 状态，**Send-Q** 表示 accept queue 的最大限制大小，**Recv-Q** 表示其实际大小。
+* 对于 **ESTABELISHED** 状态，**Send-Q** 和 **Recv-Q** 分别表示发送和接收数据包的 buffer。
+
+所以，看这里输出结果可以得知 accept queue 满了，当 **Recv-Q** 的值比 **Send-Q** 大 1 时表明 accept queue 溢出了，如果再收到 SYN 包就会丢弃掉。
+
+
+导致 accept queue 满的原因一般都是因为进程调用 **accept()** 太慢了，导致大量连接不能被及时 “拿走”。
+
+那么什么情况下进程调用 **accept()** 会很慢呢？猜测可能是进程连接负载高，处理不过来。
+
+而负载高不仅可能是 CPU 繁忙导致，还可能是 IO 慢导致，当文件 IO 慢时就会有很多 **IO WAIT**，在 **IO WAIT** 时虽然 CPU 不怎么干活，但也会占据 CPU 时间片，影响 CPU 干其它活。
+
+
+最终进一步定位发现是 nginx pod 挂载的 nfs 服务对应的 nfs server 负载较高，导致 IO 延时较大，从而使 nginx 调用 **accept()** 变慢，accept queue 溢出，使得大量代理静态图片文件的请求被丢弃，也就导致很多图片加载不出来。
+
+虽然根因不是 k8s 导致的问题，但也从中挖出一些在高并发场景下值得优化的点，请继续往下看。
+
+
+#### 九、somaxconn 的默认值很小
+我们再看下之前 ss -lnt 的输出:
+
+```
+$ ss -lnt
+State      Recv-Q Send-Q Local Address:Port                Peer Address:Port
+LISTEN     129    128                *:80                             *:*
+```
+
+仔细一看，**Send-Q** 表示 accept queue 最大的大小，才 128 ？也太小了吧！
+
+根据前面的介绍我们知道，accept queue 的最大大小会受 **net.core.somaxconn**内核参数的限制，我们看下 pod 所在节点上这个内核参数的大小:
+
+```
+$ cat /proc/sys/net/core/somaxconn
+32768
+```
+
+是 32768，挺大的，为什么这里 accept queue 最大大小就只有 128 了呢？
+
+**net.core.somaxconn** 这个内核参数是 namespace 隔离了的，我们在容器 netns 中再确认了下：
+
+```
+$ cat /proc/sys/net/core/somaxconn
+128
+```
+
+
+为什么只有 128？看下 stackoverflow 这里的讨论:
+> The "net/core" subsys is registered per network namespace. And the initial value for somaxconn is set to 128.
+
+原来新建的 netns 中 **somaxconn** 默认就为 128，在 **include/linux/socket.h** 中可以看到这个常量的定义:
+```
+/* Maximum queue length specifiable by listen.  */
+#define SOMAXCONN  128
+```
+
+很多人在使用 k8s 时都没太在意这个参数，为什么大家平常在较高并发下也没发现有问题呢？
+
+因为通常进程 **accept()** 都是很快的，所以一般 accept queue 基本都没什么积压的数据，也就不会溢出导致丢包了。
+
+对于并发量很高的应用，还是建议将 **somaxconn** 调高。虽然可以进入容器 netns 后使用 **sysctl -w net.core.somaxconn=1024** 或 **echo 1024 > /proc/sys/net/core/somaxconn**临时调整，但调整的意义不大，因为容器内的进程一般在启动的时候才会调用 listen()，然后 accept queue 的大小就被决定了，并且不再改变。
+
+
+
+下面介绍几种调整方式:
+
+方式一: 使用 k8s sysctls 特性直接给 pod 指定内核参数
+```
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sysctl-example
+spec:
+  securityContext:
+    sysctls:
+    - name: net.core.somaxconn
+      value: "8096"
+```
+有些参数是 unsafe 类型的，不同环境不一样，我的环境里是可以直接设置 pod 的 net.core.somaxconn 这个 sysctl 的。如果你的环境不行，请参考官方文档 Using sysctls in a Kubernetes Cluster 启用 unsafe 类型的 sysctl。
+> 注：此特性在 k8s v1.12 beta，默认开启。
+
+
+方式二: 使用 initContainers 设置内核参数
+
+```
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sysctl-example-init
+spec:
+  initContainers:
+  - image: busybox
+    command:
+    - sh
+    - -c
+    - echo 1024 > /proc/sys/net/core/somaxconn
+    imagePullPolicy: Always
+    name: setsysctl
+    securityContext:
+      privileged: true
+  Containers:
+  ...
+```
+> 注: init container 需要 privileged 权限。
+
+#### 十、nginx 的 backlog
+
+我们使用方式一尝试给 nginx pod 的 **somaxconn** 调高到 8096 后观察:
+
+```
+$ ss -lnt
+State      Recv-Q Send-Q Local Address:Port                Peer Address:Port
+LISTEN     512    511                *:80                             *:*
+```
+
+WTF? 还是溢出了，而且调高了 **somaxconn** 之后虽然 accept queue 的最大大小 (**Send-Q**) 变大了，但跟 8096 还差很远呀！
+
+在经过一番研究，发现 nginx 在 **listen()** 时并没有读取 **somaxconn** 作为 backlog 默认值传入，它有自己的默认值，也支持在配置里改。通过**ngx_http_core_module** 的官方文档我们可以看到它在 linux 下的默认值就是 511.
+
+配置示例:
+```
+listen  80  default  backlog=1024;
+```
+
+所以，在容器中使用 nginx 来支撑高并发的业务时，记得要同时调整下**net.core.somaxconn**内核参数和 **nginx.conf** 中的 backlog 配置。
+
+
+
+
+
 
 
 
