@@ -31,6 +31,28 @@ kubernetes 集群运行过程中，周末突然有业务模块外部访问 503�
 10.136.35.173 (master)
 10.136.35.180 (node)
 10.136.35.181 (node)
+应用A 调度到 180
+应用B 调度到 181
 ```
 
-当 master 一定时间没有收到 node 心跳时，会将该 node 设置为 NotReady,而 node 为 NotReady 时，该 node 上的 pod 所对应的 endpoints 内容会被 master 删除，其他正常的 node 的 kube-proxy 因为监控着 endpoints 变化，对应的内容为空,则 service 对应 pod 的网络转发规则 IPVS 被删除。于是前面 Nginx-> ingress -> service -X-> pod。 在最后service 到 pod 断链。
+手动在 10.136.35.180 执行 systemctl stop kubelet,停掉 kubelet。过一会之后10.136.35.173 master 未收到 10.136.35.180 心跳将其状态设置为NotReady产生 node not ready 事件。Endpoint Contoller 接收到事件将 endpoints 内容为 10.136.35.180 上 pod ip 删除掉。于是10.136.35.181 根据 endpoints 的更变将 应用A 的 service 对应 应用A pod 的 ipvs 规则删除掉，于是 service --> pod 断链，网络不通情况复现。
+
+疑惑一、node 为什么处于 NotReady 状态?
+
+k8s 集群部署了3个master 组成高可用, node 本地有一个 nginx 容器做负载均衡，事发时 node 上的 kubelet 日志报错连接不上 nginx, nginx 日志报错连接不上 master。故心跳失败，master 将其设置为 NotReady,问题定位在 以nginx 作为 lb 时 后端服务全挂的时候，偶尔一直 hand 住不往后发。最终问题定位在 nginx 负载均衡器问题。
+
+疑惑二、为什么 node 为 NotReay 其node 上	的 pod 不被迁移?
+
+默认情况下 node NotReady,k8s 过5分钟会将其pod 迁移走，这次情况没有被迁移原因在于是 kubelet 是 K8s 的 node agent,而这次问题原因就在于 kubelet 与 master 网络不通，故没有接受到迁移指令。
+
+疑惑三、为什么当时重启docker 服务正常
+ 
+node 上的 nginx 负载均衡器以 docker 容器方式运行，重启docker 负载均衡器也重启，kubelet 与 master 通信恢复正常，master 将其 pod 对应的 endpoints 内容恢复，其他 node 接到事件通知，加上 ipvs 规则，全部恢复正常。
+
+
+** 解决方案：**
+
+更换负载均衡器,开发了一个简单负载均衡器,带上后端检测及全部不健康也转发请求。
+
+
+
