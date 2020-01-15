@@ -126,4 +126,77 @@ The behavior of the backlog argument on TCP sockets changed with Linux 2.2. Now 
 
 If the backlog argument is greater than the value in /proc/sys/net/core/somaxconn, then it is silently truncated to that value; the default value in this file is 128. In kernels before 2.4.25, this limit was a hard coded value, SOMAXCONN, with the value 128.
 
+继续深挖了一下源码，结合这里的解释提炼一下：
+
+* listen 的 backlog 参数同时指定了 socket 的 syn queue 与 accept queue 大小。
+
+* accept queue 最大不能超过 **net.core.somaxconn** 的值，即:
+
+```
+max accept queue size = min(backlog, net.core.somaxconn)
+
+```
+* 如果启用了 syncookies (**net.ipv4.tcp_syncookies=1**)，当 syn queue 满了，server 还是可以继续接收 SYN 包并回复 SYN+ACK 给 client，只是不会存入 syn queue 了。因为会利用一套巧妙的 syncookies 算法机制生成隐藏信息写入响应的 SYN+ACK 包中，等 client 回 ACK 时，server 再利用 syncookies 算法校验报文，校验通过后三次握手就顺利完成了。所以如果启用了 syncookies，syn queue 的逻辑大小是没有限制的，
+* syncookies 通常都是启用了的，所以一般不用担心 syn queue 满了导致丢包。syncookies 是为了防止 SYN Flood 攻击 (一种常见的 DDoS 方式)，攻击原理就是 client 不断发 SYN 包但不回最后的 ACK，填满 server 的 syn queue 从而无法建立新连接，导致 server 拒绝服务。
+* 如果 syncookies 没有启用，syn queue 的大小就有限制，除了跟 accept queue 一样受**net.core.somaxconn**大小限制之外，还会受到**net.ipv4.tcp_max_syn_backlog**的限制，即:
+```
+max syn queue size = min(backlog, net.core.somaxconn, net.ipv4.tcp_max_syn_backlog)
+
+```
+4.3 及其之前版本的内核，syn queue 的大小计算方式跟现在新版内核这里还不一样，详细请参考 [commit ef547f2ac16b](https://github.com/torvalds/linux/commit/ef547f2ac16bd9d77a780a0e7c70857e69e8f23f#diff-56ecfd3cd70d57cde321f395f0d8d743L43)
+
+#### 七、队列溢出
+
+毫无疑问，在队列大小有限制的情况下，如果队列满了，再有新连接过来肯定就有问题。
+
+翻下 linux 源码，看下处理 SYN 包的部分，在**net/ipv4/tcp_input.c**的**tcp_conn_request**函数:
+```
+
+if ((net->ipv4.sysctl_tcp_syncookies == 2 ||
+     inet_csk_reqsk_queue_is_full(sk)) && !isn) {
+  want_cookie = tcp_syn_flood_action(sk, rsk_ops->slab_name);
+  if (!want_cookie)
+    goto drop;
+}
+
+if (sk_acceptq_is_full(sk)) {
+  NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENOVERFLOWS);
+  goto drop;
+}
+```
+
+**goto drop** 最终会走到 **tcp_listendrop** 函数，实际上就是将 **ListenDrops** 计数器 +1:
+```
+
+static inline void tcp_listendrop(const struct sock *sk)
+{
+  atomic_inc(&((struct sock *)sk)->sk_drops);
+  __NET_INC_STATS(sock_net(sk), LINUX_MIB_LISTENDROPS);
+}
+```
+
+大致可以看出来，对于 SYN 包：
+
+
+* 如果 syn queue 满了并且没有开启 syncookies 就丢包，并将**ListenDrops**计数器 +1。
+* 如果 accept queue 满了也会丢包，并将**ListenOverflows**和 **ListenDrops**计数器 +1。
+
+而我们前面排查问题通过**netstat -s**看到的丢包统计，其实就是对应的**ListenOverflows**和**ListenDrops**这两个计数器。除了用**netstat -s**，还可以使用**nstat -az**直接看系统内各个计数器的值:
+
+```
+$ nstat -az | grep -E 'TcpExtListenOverflows|TcpExtListenDrops'
+TcpExtListenOverflows           12178939              0.0
+TcpExtListenDrops               12247395              0.0
+```
+
+
+
+
+
+
+
+
+
+
+
 
