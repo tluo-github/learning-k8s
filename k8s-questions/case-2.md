@@ -51,9 +51,16 @@ $ echo $?
 
 这里要动用 **nsenter** 命令，这个命令可以进入到namespace里执行一些命令。比如
 
+```shell
+nsenter --net=/var/run/docker/netns/421bdb2accf1 ifconfig -a
+
 ```
-$ nsenter --net=/var/run/docker/netns/421bdb2accf1 ifconfig -a
-```
+
+上述的命令，到 var/run/docker/netns/421bdb2accf1 这个network namespace里执行了 ifconfig -a 命令。于是我们可以用下面 命令来遍历所有的network namespace。
+
+
+
+
 
 
 
