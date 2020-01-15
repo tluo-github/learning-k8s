@@ -69,6 +69,94 @@ $ ls /var/run/docker/netns | xargs -I {} nsenter --net=/var/run/docker/netns/{} 
 * **10.233.14.137**，这个IP没有在docker的network namespace下查到。
 
 
+有namespace leaking？于是我上网查了一下，发现了一个docker的bug – 在docker remove/stop 一个容器的时候，没有清除相应的network namespace，这个问题被报告到了 [Issue#31597](https://github.com/moby/moby/issues/31597) 然后被fix在了 [PR#31996](https://github.com/moby/moby/pull/31996)，并Merge到了 Docker的 17.05版中。而用户的版本是 17.09，应该包含了这个fix。不应该是这个问题，感觉又走不下去了。
+
+不过， **10.233.14.137** 这个IP可以ping得通，说明这个IP一定被绑在某个网卡，而且被隐藏到了某个network namespace下。
+
+
+
+到这里，要查看所有network namespace，只有最后一条路了，那就是到 **/proc/** 目录下，把所有的pid下的 **/proc/<pid>/ns** 目录给穷举出来。好在这里有一个比较方便的命令可以干这个事 ： **lsns**
+```
+$ lsns -t net | awk ‘{print $4}' | xargs -t -I {} nsenter -t {}&nbsp;-n ip addr | grep -C 4 "10.233.14.137"
+```
+
+* lsns -t net 列出所有开了network namespace的进程，其第4列是进程PID
+* 把所有开过network namespace的进程PID拿出来，转给 xargs 命令
+* 由 xargs 命令把这些PID 依次传给 nsenter 命令，
+  * xargs -t 的意思是会把相关的执行命令打出来，这样我知道是那个PID。
+  * xargs -I {}  是声明一个占位符来替换相关的PID
+  
+最后，我们发现，虽然在 **/var/run/docker/netns** 下没有找到 **10.233.14.137** ，但是在 **lsns** 中找到了三个进程，他们都用了**10.233.14.137** 这个IP（冲突了这么多），而且他们的MAC地址全是一样的！（怪不得arping找不到）。通过**ps** 命令，可以查到这三个进程，有两个是java的，还有一个是**/pause** （这个应该是kubernetes的沙盒）。
+
+我们继续乘胜追击，穷追猛打，用**pstree**命令把整个进程树打出来。发现上述的三个进程的父进程都在多个同样叫 **docker-contiane** 的进程下！
+
+**这明显还是docker的，但是在docker ps 中却找不道相应的容器，什么鬼！快崩溃了……**
+
+继续看进程树，发现，这些 **docker-contiane** 的进程的父进程不在 **dockerd** 下面，而是在 **systemd** 这个超级父进程PID 1下，我靠！进而发现了一堆这样的野进程（这种野进程或是僵尸进程对系统是有害的，至少也是会让系统进入亚健康的状态，因为他们还在占着资源）。
+
+
+**docker-contiane** 应该是 **dockerd** 的子进程，被挂到了 **pid 1** 只有一个原因，那就是父进程“飞”掉了，只能找 pid 1 当养父。这说明，这台机器上出现了比较严重的 dockerd 进程退出的问题，而且是非常规的，因为 systemd 之所以要成为 pid 1，其就是要监管所有进程的子子孙孙，居然也没有管理好，说明是个非常规的问题。（注，关于 systemd，请参看《Linux PID 1 和 Systemd 》，关于父子进程的事，请参看《Unix高级环境编程》一书）
+
+
+接下来就要看看 **systemd** 为 **dockerd** 记录的日志了…… （然而日志只有3天的了，这3天dockerd没有任何异常）
+
+**问题原因**
+这两天在自己的环境下测试了一下，发现，只要是通过 **systemctl start/stop docker ** 这样的命令来启停 Docker， 是可以把所有的进程和资源全部干掉的。这个是没有什么问题的。我唯一能重现用户问题的的操作就是直接 ** kill -9 <dockerd pid>**  但是这个事用户应该不会干。而 Docker 如果有 crash 事件时，Systemd 是可以通过 **journalctl -u docker** 这样的命令查看相关的系统日志的。
+
+
+于是，我找用户了解一下他们在**Docker**在启停时的问题，用户说，他们的执行 **systemctl stop docker **这个命令的时候，发现这个命令不响应了，有可能就直接按了 **Ctrl +C** 了！
+
+
+这个应该就是导致大量的 **docker-containe **进程挂到 **PID 1** 下的原因了。前面说过，用户的一台物理机上运行着上百个容器，所以，那个进程树也是非常庞大的，我想，停服的时候，系统一定是要遍历所有的docker子进程来一个一个发退出信号的，这个过程可能会非常的长。导致操作员以为命令假死，而直接按了 Ctrl + C ，最后导致很多容器进程并没有终止……
+
+**其他事宜**
+
+有同学问，为什么我在这个文章里写的是 **docker-containe** 而不是 **containd** 进程？这是因为被 **pstree** 给截断了，用 **ps** 命令可以看全，只是进程名的名字有一个 **docker-**的前缀。
+
+下面是这两种不同安装包的进程树的差别（其中 **sleep** 是我用 **buybox** 镜像启动的）
+
+CENTOS 系统安装包
+```
+systemd───dockerd─┬─docker-contained─┬─3*[docker-contained-shim─┬─sleep]
+                  │                 │                    └─9*[{docker-containe}]]
+                  │                 ├─docker-contained-shim─┬─sleep
+                  │                 │                 └─10*[{docker-containe}]
+                  │                 └─14*[{docker-contained-shim}]
+                  └─17*[{dockerd}]
+```
+
+DOCKER 官方安装包
+```
+systemd───dockerd─┬─containerd─┬─3*[containerd-shim─┬─sleep]
+                  │            │                 └─9*[{containerd-shim}]
+                  │            ├─2*[containerd-shim─┬─sleep]
+                  │            │                    └─9*[{containerd-shim}]]
+                  │            └─11*[{containerd}]
+                  └─10*[{dockerd}]
+```
+
+顺便说一下，自从 Docker 1.11版以后，Docker进程组模型就改成上面这个样子了.
+
+* **dockerd** 是 Docker Engine守护进程，直接面向操作用户。**dockerd** 启动时会启动 **containerd** 子进程，他们之前通过RPC进行通信。
+* **containerd** 是**dockerd**和**runc**之间的一个中间交流组件。他与 **dockerd** 的解耦是为了让Docker变得更为的中立，而支持OCI 的标准 。
+* **containerd-shim**  是用来真正运行的容器的，每启动一个容器都会起一个新的**shim**进程， 它主要通过指定的三个参数：容器id，boundle目录（containerd的对应某个容器生成的目录，一般位于：/var/run/docker/libcontainerd/containerID）， 和运行命令（默认为 runc）来创建一个容器。
+
+
+
+### 总结
+1. 对于问题调查，需要比较扎实的基础知识，知道问题的成因和范围。
+2. 如果走不下去了，要重新梳理一下，回头仔细看一下一些蛛丝马迹，认真推敲每一个细节。
+3. 各种诊断工具要比较熟悉，这会让你事半功倍。
+4. 系统维护和做清洁比较类似，需要经常看看系统中是否有一些僵尸进程或是一些垃圾东西，这些东西要及时清理掉。
+
+
+
+
+
+
+
+
+
 
 
 
