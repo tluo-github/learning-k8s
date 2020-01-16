@@ -168,6 +168,130 @@ NUMA全称Non-Uniform Memory Access，NUMA服务器一般有多个节点，每�
 经过深入排查才发现，原来相关同事之前为了让Kubernetes的相关进程和普通的用户的进程相隔离，设置了CPU的亲和性，让Kubernetes的相关进程绑定到宿主机的最后四个核上，用户的进程绑定到其他的核上，但后面这一步并没有生效。
 
 
+还是拿12核的例子来说，上面的Kubernetes是绑定到8-11核，但用户的进程还是工作在0-11核上，更重要的是，最后4个核在遇到D厂家的这种机型时，实际上是跨NUMA绑定，导致了延迟越来越高，而用户进程运行在相关的核上就会导致超时等各种故障。
+
+确定问题后，解决起来就简单了。将所有宿主机的绑核去掉，延迟就消失了，以下图是D厂的机型去掉绑核后开机26天Perf的调度延迟，从数据上看一切都恢复正常。
+![](/images/case-7-22.webp)
+
+### 新的问题
+
+大约过了几个月，又有新的超时问题找到我们。有了之前的排查经验，我们觉得这次肯定能很轻易的定位到问题，然而现实无情地给予了我们当头一棒，4.14.67内核的宿主机，还是有大量无规律超时。
+
+### 深入分析
+
+Perf看调度延迟，如图23所示，调度延迟比较大但并没有集中在最后四个核上，完全无规律，同样Turbostat依然观察到TSC的频率在跳动。
+![](/images/case-7-23.webp)
+
+在各种猜想和验证都被一一证否后，我们开始挨个排除来做测试：
+1. 我们将某台A宿主机实例迁移走，Perf看上去恢复了正常，而将实例迁移回来，延迟又出现了。
+2. 另外一台B宿主机上，我们发现即使将所有的实例都清空，Perf依然能录得比较高的延迟。
+3. 而与B相连编号同一机型的C宿主机迁移完实例后重启，Perf恢复正常。这时候看B的TOP，只有一个kubelet在消耗CPU，将这台宿主机上的kubelet停掉，Perf正常，开启kubelet后，问题又依旧。
+
+这样我们基本可以确定kubelet的某些行为导致了宿主机卡顿和实例超时，对比正常/非正常的宿主机kubelet日志，每秒钟都在获取所有实例的监控信息，在非正常的宿主机上，会打印以下的日志。如图24所示：
+![](/images/case-7-24.webp)
+
+而在正常的宿主机上没有该日志或者该时间比较短，如图25所示：
+![](/images/case-7-25.webp)
+
+到这里，我们怀疑这些LOG的行为可能指向了问题的根源。查看Kubernetes代码，可以知道在获取时间超过指定值longHousekeeping （100ms）后，Kubernetes会记录这一行为，而updateStats即获取本地的一些监控数据，如图26代码所示：
+
+```
+func (c *containerData) housekeepingTick(timer <-chan time.Time, longHousekeeping time.Duration) bool {
+	select {
+	case <-c.stop:
+		// Stop housekeeping when signaled.
+		return false
+	case finishedChan := <-c.onDemandChan:
+		// notify the calling function once housekeeping has completed
+		defer close(finishedChan)
+	case <-timer:
+	}
+	start := c.clock.Now()
+	err := c.updateStats()
+	if err != nil {
+		if c.allowErrorLogging() {
+			klog.Warningf("Failed to update stats for container \"%s\": %s", c.info.Name, err)
+		}
+	}
+	// Log if housekeeping took too long.
+	duration := c.clock.Since(start)
+	if duration >= longHousekeeping {
+		klog.V(3).Infof("[%s] Housekeeping took %s", c.info.Name, duration)
+	}
+	c.notifyOnDemand()
+	c.statsLastUpdatedTime = c.clock.Now()
+	return true
+}
+```
+
+在网上搜索相关issue，问题指向cAdvisor的消耗CPU过高：
+
+* https://github.com/kubernetes/kubernetes/issues/15644
+* https://github.com/google/cadvisor/issues/1498
+
+https://github.com/google/cadvisor/issues/1774 指出 echo2 > /proc/sys/vm/drop_caches
+
+可以暂时解决这种问题。我们尝试在有问题的机器上执行清除缓存的指令，超时问题就消失了，如图27所示。而从根本上解决这个问题，还是要减少取Metrics的频率，比较耗时的Metrics干脆不取或者完全隔离Kubernetes的进程和用户进程才可以。
+
+![](/images/case-7-27.webp)
+
+### 硬件故障
+
+在排查cAdvisor导致的延迟的过程中，还发现一部分用户报障的超时，并不是cAdvisor导致的，主要表现在没有Housekeeping的日志，并且Perf结果看上去完全正常，说明没有调度方面的延迟，但从TSC的获取上还是能观察到异常。
+
+
+由此我们怀疑这是另一种全新的故障，最重要的是我们将某台宿主机所有业务完全迁移掉，并关闭所有可以关闭的进程，只保留内核的进程后，TSC依然不正常并伴随肉眼可见的卡顿，而这种现象跟之前DBA那台物理机卡顿的问题很相似，这告诉我们很有可能是硬件方面的问题。
+
+
+从以往的排障经验来看，TSC抖动程度对于我们排查宿主机是否稳定有重要的参考作用。这时我们决定将TSC的检测程序做成一个系统服务，每100ms去取一次系统的TSC值，将TSC的差值大于指定值打印到日志中，并采集单位时间的异常条目数和最大TSC差值，放在监控系统上，来观察异常的规律。如图28所示。
+
+![](/images/case-7-28.webp)
+
+恰好TSC检测的服务上线不久，一次明显的故障说明了它检测宿主机是否稳定的有效性。如图29，在某日8点多时，一台宿主机TSC突然升高，与应用的告警邮件和用户报障同一时刻到来。如图30所示：
+
+![](/images/case-7-29.webp)
+![](/images/case-7-30.webp)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
