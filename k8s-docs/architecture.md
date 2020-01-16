@@ -57,10 +57,10 @@ spec:
 kubectl apply -f nginx-deployment.yaml
 ```
 
-#### 1. Kubectl 会执行客户端验证，以确保非法请求（如创建不支持的资源或使用格式错误的镜像名称）快速失败，并不会发送给 kube-apiserver——即通过减少不必要的负载来提高系统性能。
-#### 2. Kubectl 开始封装它将发送给 kube-apiserver 的 HTTP 请求。在 Kubernetes 中，访问或更改状态的所有尝试都通过 kube-apiserver 进行，后者又与 etcd 进行通信.
-#### 3. APIServer 接收到 Kubectl 发出的RESTFull 请求，开始验证\(Authentication\) 和 授权\(Authorization\)。之后进入Admission Controllers。
-#### 4. Admission Controllers 拦截该请求，以确保它符合集群更广泛的期望和规则。它们是对象持久化到 etcd 之前的最后一个堡垒，因此它们封装了剩余的系统检查以确保操作不会产生意外或负面结果。Admission Controller 的工作方式类似于 Authentication 和 Authorization，但有一个区别：如果单个 Admission Controller 失败，则整个链断开，请求将失败。Admission Controller 设计的真正优势在于它致力于提升可扩展性。每个控制器都作为插件存储在 plugin/pkg/admission 目录中，最后编译进 kube-apiserver 二进制文件。例如：启动容器之前需要下载镜像，或者检查具备某命名空间的资源。目前支持的准入控制器有：
+ 1. Kubectl 会执行客户端验证，以确保非法请求（如创建不支持的资源或使用格式错误的镜像名称）快速失败，并不会发送给 kube-apiserver——即通过减少不必要的负载来提高系统性能。
+2. Kubectl 开始封装它将发送给 kube-apiserver 的 HTTP 请求。在 Kubernetes 中，访问或更改状态的所有尝试都通过 kube-apiserver 进行，后者又与 etcd 进行通信.
+3. APIServer 接收到 Kubectl 发出的RESTFull 请求，开始验证\(Authentication\) 和 授权\(Authorization\)。之后进入Admission Controllers。
+4. Admission Controllers 拦截该请求，以确保它符合集群更广泛的期望和规则。它们是对象持久化到 etcd 之前的最后一个堡垒，因此它们封装了剩余的系统检查以确保操作不会产生意外或负面结果。Admission Controller 的工作方式类似于 Authentication 和 Authorization，但有一个区别：如果单个 Admission Controller 失败，则整个链断开，请求将失败。Admission Controller 设计的真正优势在于它致力于提升可扩展性。每个控制器都作为插件存储在 plugin/pkg/admission 目录中，最后编译进 kube-apiserver 二进制文件。例如：启动容器之前需要下载镜像，或者检查具备某命名空间的资源。目前支持的准入控制器有：
 
    * AlwaysPullImages：此准入控制器修改每个 Pod 的时候都强制重新拉取镜像。
    * DefaultStorageClass：此准入控制器观察创建PersistentVolumeClaim时不请求任何特定存储类的对象，并自动向其添加默认存储类。这样，用户就不需要关注特殊存储类而获得默认存储类。
@@ -114,7 +114,7 @@ Kubernetes 就是用这种 List-Watch 的机制保持数据同步的，如上图
 * etcd 将更新成功的事件发送给 APIServer。
 * 注意这里的 kubelet 是在 Node 上面运行的进程，它也通过 List-Watch 的方式监听\(Watch\)APIServer 发送的 Pod 更新的事件。实际上，在第 Scheduler 调度完成后，创建 Pod 的工作就已经完成了。
 
-#### 5.  Deployment Controller 
+5.  Deployment Controller 
 
 截至目前，我们的 Deployment 已经存储于 etcd 中，并且所有的初始化逻辑都已完成。接下来的阶段将涉及 Deployment 所依赖的资源拓扑结构。
 
@@ -128,17 +128,17 @@ Kubernetes 系统中使用了大量的 Controller， Controller 是一个用于�
 
 当完成以上步骤之后，该 Deployment 的 status 就会被更新，然后重新进入与之前相同的循环，等待 Deployment 与期望的状态相匹配。由于 Deployment Controller 只关心 ReplicaSet， 因此需要 ReplicaSet Controller 继续调谐过程。
 
-#### 6. ReplicaSet Controller
+6. ReplicaSet Controller
 
 ReplicaSet 控制器的作用是监视 ReplicaSet 及其相关资源 Pod 的生命周期。由 Deployment Controller 创建 ReplicaSet 的时候ReplicaSet  会检查新 ReplicaSet 的状态，并意识到现有状态与期望状态之间存在偏差。然后，它会尝试通过调整 Pod 的副本数来调谐这种状态。
 
-#### 7. Scheduler
+7. Scheduler
 
 当所有的 Controller 正常运行后，etcd 中就会保存一个 Deployment、一个 ReplicaSet 和 三个 Pod， 并且可以通过 kube-apiserver 查看到。然而，这些 Pod 还处于 Pending 状态，因为它们还没有被调度到集群中合适的 Node 上。最终解决这个问题的 Controller 是 Scheduler。
 
 Scheduler 作为一个独立的组件运行在集群控制平面上，工作方式与其他 Controller 相同：监听事件并调谐状态。一旦 Scheduler 将 Pod 调度到某个节点上，该节点的 Kubelet 就会接管该 Pod 并开始部署。
 
-#### 8. Kubelet
+8. Kubelet
 
 在 Kubernetes 集群中，每个 Node 节点上都会启动一个 Kubelet 服务进程，该进程用于处理 Scheduler 下发到本节点的任务，管理 Pod 的生命周期。这意味着它将处理 Pod 与 Container Runtime 之间所有的转换逻辑，包括挂载卷、容器日志、垃圾回收以及其他重要事件。
 
@@ -164,7 +164,7 @@ Scheduler 作为一个独立的组件运行在集群控制平面上，工作方�
 * 从 apiserver 中检索 Spec.ImagePullSecrets，然后将对应的 Secret 注入到容器中；
 * 最后，通过容器运行时 （Container Runtime） 启动容器（下面会详细描述）。
 
-#### 9. CRI 和 pause 容器 
+9. CRI 和 pause 容器 
 
 CRI 提供了 Kubelet 和特定容器运行时实现之间的抽象。通过 protocol buffers（一种更快的 JSON） 和 gRPC API（一种非常适合执行 Kubernetes 操作的API）进行通信。
 
@@ -178,7 +178,7 @@ CRI 提供了 Kubelet 和特定容器运行时实现之间的抽象。通过 pro
 
 创建 **pause** 容器后，将开始检查磁盘状态然后启动主容器。
 
-#### 10. CNI 和 Pod 网络
+10. CNI 和 Pod 网络
 
 现在，我们的 Pod 有了基本的骨架：一个 pause 容器，它托管所有 Namespaces 以允许 Pod 间通信。但容器的网络如何运作以及建立的？
 
@@ -211,7 +211,7 @@ Kubelet 通过 stdin 将 JSON 数据（配置文件位于 **/etc/cni/net.d** 中
 * 对于 DNS， Kubelet 将为 CNI 插件指定 Kubernetes 集群内部 DNS 服务器 IP 地址，确保正确设置容器的 resolv.conf 文件。
 
 
-#### 11.  跨主机容器网络 
+11.  跨主机容器网络 
 
 到目前为止，我们已经描述了容器如何与宿主机进行通信，但跨主机之间的容器如何通信呢？
 
@@ -219,7 +219,7 @@ Kubelet 通过 stdin 将 JSON 数据（配置文件位于 **/etc/cni/net.d** 中
 
 flannel 不会管容器与宿主机之间的通信（这是 CNI 插件的职责），但它对主机间的流量传输负责。为此，它为主机选择一个子网并将其注册到 etcd，然后保留集群路由的本地表示，并将传出的数据包封装在 UDP 数据报中，确保它到达正确的主机。
 
-#### 12.启动容器
+12.启动容器
 
 所有的网络配置都已完成。还剩什么？真正启动工作负载容器！
 
