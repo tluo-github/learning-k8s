@@ -63,7 +63,7 @@ Processor 中记录了所有的回调函数实例\(即 ResourceEventHandler 实�
    LocalStore 会周期性地把所有的 Pod 信息重新放到 DeltaFIFO 中
 
 #### Informer 总结
-
+![](/images/k8s-informer-4.jpg)
 Informer 的内部原理比较复杂、不太容易上手，但 Informer 却是一个非常稳定可靠的 package，已被 Kubernetes 广泛使用。但是，目前关于 Informer 的文章不是很多，如果文章中有表述不正确的地方，希望各位读者悉心指正。
 
 来源:
