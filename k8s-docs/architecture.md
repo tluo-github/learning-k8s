@@ -22,7 +22,8 @@ Node 主要包含组件:
 ![](/images/kubernetes-high-level-component-archtecture.jpg)
 
 各组件交互流程:  
-1.  使用kubectl 对 Kubernetes 下命令的，它通过 APIServer 去调用各个进程来完成对 Node 的部署和控制。  
+
+1. 使用kubectl 对 Kubernetes 下命令的，它通过 APIServer 去调用各个进程来完成对 Node 的部署和控制。  
 2. APIServer 的核心功能是对核心对象\(例如：Pod，Service，RC\)的增删改查操作，同时也是集群内模块之间数据交换的枢纽。它包括了常用的 API，访问\(权限\)控制，注册，信息存储\(etcd\)等功能。  
 3. APIServer 将信息存入 etcd 中。  
 4. Controller Manager 控制控制权。它包括 8 个 Controller，分别对应着副本，节点，资源，命名空间，服务等等。  
