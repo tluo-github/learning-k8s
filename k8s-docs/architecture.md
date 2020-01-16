@@ -100,19 +100,19 @@ kubectl apply -f nginx-deployment.yaml
 
 Kubernetes 就是用这种 List-Watch 的机制保持数据同步的，如上图：
 
-  * 这里有三个 List-Watch，分别是 kube-controller-manager\(运行在Master\)，kube-scheduler\(运行在 Master\)，kublete\(运行在 Node\)。他们在进程已启动就会监听\(Watch\)APIServer 发出来的事件。
-  * kubectl 通过命令行，在 APIServer 上建立一个 Pod 副本。
-  * 这个部署请求被记录到 etcd 中，存储起来。
-  * 当 etcd 接受创建 Pod 信息以后，会发送一个 Create 事件给 APIServer。
-  * 由于 Kubecontrollermanager 一直在监听 APIServer 中的事件。此时 APIServer 接受到了 Create 事件，又会发送给 Kubecontrollermanager。
-  * Kubecontrollermanager 在接到 Create 事件以后，调用其中的 Replication Controller 来保证 Node 上面需要创建的副本数量。
-  * 在 Controller Manager 创建 Pod 副本以后，APIServer 会在 etcd 中记录这个 Pod 的详细信息。例如在 Pod 的副本数，Container 的内容是什么。
-  * 同样的 etcd 会将创建 Pod 的信息通过事件发送给 APIServer。
-  * 由于 Scheduler 在监听\(Watch\)APIServer，接收到 APIServer 的创建Pod 事件,将待调度的 Pod 按照调度算法和策略绑定到集群中 Node 上，并将绑定信息写入 etcd 中。
-  * Scheduler 调度完毕以后会更新 Pod 的信息，此时的信息更加丰富了。除了知道 Pod 的副本数量，副本内容。还知道部署到哪个 Node 上面了。
-  * 同样，将上面的 Pod 信息更新到 etcd 中，保存起来。
-  * etcd 将更新成功的事件发送给 APIServer。
-  * 注意这里的 kubelet 是在 Node 上面运行的进程，它也通过 List-Watch 的方式监听\(Watch\)APIServer 发送的 Pod 更新的事件。实际上，在第 Scheduler 调度完成后，创建 Pod 的工作就已经完成了。
+    * 这里有三个 List-Watch，分别是 kube-controller-manager\(运行在Master\)，kube-scheduler\(运行在 Master\)，kublete\(运行在 Node\)。他们在进程已启动就会监听\(Watch\)APIServer 发出来的事件。
+    * kubectl 通过命令行，在 APIServer 上建立一个 Pod 副本。
+    * 这个部署请求被记录到 etcd 中，存储起来。
+    * 当 etcd 接受创建 Pod 信息以后，会发送一个 Create 事件给 APIServer。
+    * 由于 Kubecontrollermanager 一直在监听 APIServer 中的事件。此时 APIServer 接受到了 Create 事件，又会发送给 Kubecontrollermanager。
+    * Kubecontrollermanager 在接到 Create 事件以后，调用其中的 Replication Controller 来保证 Node 上面需要创建的副本数量。
+    * 在 Controller Manager 创建 Pod 副本以后，APIServer 会在 etcd 中记录这个 Pod 的详细信息。例如在 Pod 的副本数，Container 的内容是什么。
+    * 同样的 etcd 会将创建 Pod 的信息通过事件发送给 APIServer。
+    * 由于 Scheduler 在监听\(Watch\)APIServer，接收到 APIServer 的创建Pod 事件,将待调度的 Pod 按照调度算法和策略绑定到集群中 Node 上，并将绑定信息写入 etcd 中。
+    * Scheduler 调度完毕以后会更新 Pod 的信息，此时的信息更加丰富了。除了知道 Pod 的副本数量，副本内容。还知道部署到哪个 Node 上面了。
+    * 同样，将上面的 Pod 信息更新到 etcd 中，保存起来。
+    * etcd 将更新成功的事件发送给 APIServer。
+    * 注意这里的 kubelet 是在 Node 上面运行的进程，它也通过 List-Watch 的方式监听\(Watch\)APIServer 发送的 Pod 更新的事件。实际上，在第 Scheduler 调度完成后，创建 Pod 的工作就已经完成了。
 
 5. Deployment Controller 
 
