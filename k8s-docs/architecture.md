@@ -63,7 +63,7 @@ kubectl apply -f nginx-deployment.yaml
 1. Kubectl 会执行客户端验证，以确保非法请求（如创建不支持的资源或使用格式错误的镜像名称）快速失败，并不会发送给 kube-apiserver——即通过减少不必要的负载来提高系统性能。
 2. Kubectl 开始封装它将发送给 kube-apiserver 的 HTTP 请求。在 Kubernetes 中，访问或更改状态的所有尝试都通过 kube-apiserver 进行，后者又与 etcd 进行通信.
 3. APIServer 接收到 Kubectl 发出的RESTFull 请求，开始验证(Authentication) 和 授权(Authorization)。之后进入Admission Controllers。
-4. Admission Controllers 拦截该请求，以确保它符合集群更广泛的期望和规则。它们是对象持久化到 etcd 之前的最后一个堡垒，因此它们封装了剩余的系统检查以确保操作不会产生意外或负面结果。例如：启动容器之前需要下载镜像，或者检查具备某命名空间的资源。目前支持的准入控制器有：
+4. Admission Controllers 拦截该请求，以确保它符合集群更广泛的期望和规则。它们是对象持久化到 etcd 之前的最后一个堡垒，因此它们封装了剩余的系统检查以确保操作不会产生意外或负面结果。Admission Controller 的工作方式类似于 Authentication 和 Authorization，但有一个区别：如果单个 Admission Controller 失败，则整个链断开，请求将失败。Admission Controller 设计的真正优势在于它致力于提升可扩展性。每个控制器都作为插件存储在 plugin/pkg/admission 目录中，最后编译进 kube-apiserver 二进制文件。例如：启动容器之前需要下载镜像，或者检查具备某命名空间的资源。目前支持的准入控制器有：
   * AlwaysPullImages：此准入控制器修改每个 Pod 的时候都强制重新拉取镜像。
   * DefaultStorageClass：此准入控制器观察创建PersistentVolumeClaim时不请求任何特定存储类的对象，并自动向其添加默认存储类。这样，用户就不需要关注特殊存储类而获得默认存储类。
   * DefaultTolerationSeconds：此准入控制器将Pod的容忍时间notready:NoExecute和unreachable:NoExecute 默认设置为5分钟。
@@ -90,7 +90,7 @@ kubectl apply -f nginx-deployment.yaml
   * ServiceAccount：此准入控制器实现serviceAccounts的自动化。
 用中的存储对象保护：该StorageObjectInUseProtection插件将kubernetes.io/pvc-protection或kubernetes.io/pv-protection终结器添加到新创建的持久卷声明（PVC）或持久卷（PV）。在用户删除PVC或PV的情况下，PVC或PV不会被移除，直到PVC或PV保护控制器从PVC或PV中移除终结器。有关更多详细信息，请参阅使用中的存储对象保护。
   * ValidatingAdmissionWebhook（1.8版本中为alpha；1.9版本中为beta）：该准入控制器调用与请求匹配的任何验证webhook。匹配的webhooks是并行调用的；如果其中任何一个拒绝请求，则请求失败。
-
+ 5.   
 
 
 
