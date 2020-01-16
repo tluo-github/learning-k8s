@@ -10,7 +10,37 @@
     * [记一次KUBERNETES/DOCKER网络排障](k8s-questions/case-2.md)
     * [诡异的 No route to host](k8s-questions/case-3.md)
     * [神秘的溢出与丢包](k8s-questions/case-4.md)
-    * [容器偶发性超时问题案例分析](k8s-questions/case-5.md)
+    * [Redis迁移容器后Slowlog“异常”分析](k8s-questions/case-5.md)
+    * [容器偶发性超时问题案例分析](k8s-questions/case-6.md)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
