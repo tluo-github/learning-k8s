@@ -20,4 +20,50 @@ Node 主要包含组件:
 
 下图清晰表明了Kubernetes的架构设计以及组件之间的通信协议。
 
+![](/images/kubernetes-high-level-component-archtecture.jpg)
+
+
+各组件交互流程:
+1.  使用kubectl 对 Kubernetes 下命令的，它通过 APIServer 去调用各个进程来完成对 Node 的部署和控制。
+2. APIServer 的核心功能是对核心对象(例如：Pod，Service，RC)的增删改查操作，同时也是集群内模块之间数据交换的枢纽。它包括了常用的 API，访问(权限)控制，注册，信息存储(etcd)等功能。
+3. APIServer 将信息存入 etcd 中。
+4. Controller Manager 控制控制权。它包括 8 个 Controller，分别对应着副本，节点，资源，命名空间，服务等等。
+5. Scheduler Controller 会把 Pod 调度到 Node 上，调度完以后就由 kubelet 来管理 Node 了。
+6. kubelet 用于处理 Master 下发到 Node 的任务(即 Scheduler 的调度任务)，同时管理 Pod 及 Pod 中的容器。也会在 APIServer 上注册 Node 信息，定期向 Master 汇报 Node 信息，并通过 cAdvisor 监控容器和节点资源。
+7. kube-proxy 完成 service 的定义提供服务发现和负载均衡。
+
+#### 一个部署例子
+
+部署一个nginx,分析各组件通讯过程
+
+
+```
+# nginx-deployment.yaml 
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+spec:
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.7.9
+        ports:
+        - containerPort: 80
+```
+
+
+
+
+
+
+
+
+
+
 
