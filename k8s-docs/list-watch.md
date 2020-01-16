@@ -51,6 +51,124 @@ kubernetes没有像其他分布式系统中额外引入MQ，是因为其设计�
 List-watch是k8s统一的异步消息处理机制，list通过调用资源的list API罗列资源，基于HTTP短链接实现；watch则是调用资源的watch API监听资源变更事件，基于HTTP长链接实现。在kubernetes中，各组件通过监听Apiserver的资源变化，来更新资源状态。
 
 这里对watch简要说明，流程如下图所示：
+![](/images/k8s-list-watch-1.jpg)
+
+1. 首先需要强调一点，list或者watch的数据，均是来自于etcd的数据，因此在Apiserver中，一切的设计都是为了获取最新的etcd数据并返回给client。
+2. 当Apiserver监听到各组件发来的watch请求时，由于list和watch请求的格式相似，先进入ListResource函数进行分析，若解析为watch请求，便会创建一个watcher结构来响应请求。watcher的生命周期是每个http请求的。
+
+```
+//每一个Watch请求对应一个watcher结构
+func (a *APIInstaller) registerResourceHandlers(path string, storage rest.Storage,... ...
+...
+lister, isLister := storage.(rest.Lister)
+watcher, isWatcher := storage.(rest.Watcher) ...(1) ... case "LIST": // List all resources of a kind.
+...
+```
+3. 创建了watcher，但谁来接收并缓存etcd的数据呢？Apiserver使用cacher来接收etcd的事件，cacher也是Storage类型，这里cacher可以理解为是监听etcd的一个实例，cacher针对于某个类型的数据，其cacher通过ListAndWatch()这个方法，向etcd发送watch请求。etcd会将某一类型的数据同步到watchCache这个结构，也就是说，ListAndWatch()将远端数据源源不断同步到cacher结构中来。Cacher的结构如下所示：
+```
+type Cacher struct {
+ incomingHWM storage.HighWaterMark
+ incoming chan watchCacheEvent
+ sync.RWMutex
+ // Before accessing the cacher's cache, wait for the ready to be ok.
+ // This is necessary to prevent users from accessing structures that are
+ // uninitialized or are being repopulated right now.
+ // ready needs to be set to false when the cacher is paused or stopped.
+ // ready needs to be set to true when the cacher is ready to use after
+ // initialization.
+ ready *ready
+ // Underlying storage.Interface.
+ storage storage.Interface
+ // Expected type of objects in the underlying cache.
+ objectType reflect.Type
+ // "sliding window" of recent changes of objects and the current state.
+ watchCache *watchCache
+ reflector *cache.Reflector
+ // Versioner is used to handle resource versions.
+ versioner storage.Versioner
+ // newFunc is a function that creates new empty object storing a object of type Type.
+ newFunc func() runtime.Object
+ // indexedTrigger is used for optimizing amount of watchers that needs to process
+ // an incoming event.
+ indexedTrigger *indexedTriggerFunc
+ // watchers is mapping from the value of trigger function that a
+ // watcher is interested into the watchers
+ watcherIdx int
+ watchers indexedWatchers
+ // Defines a time budget that can be spend on waiting for not-ready watchers
+ // while dispatching event before shutting them down.
+ dispatchTimeoutBudget *timeBudget
+ // Handling graceful termination.
+ stopLock sync.RWMutex
+ stopped bool
+ stopCh chan struct{}
+ stopWg sync.WaitGroup
+ clock clock.Clock
+ // timer is used to avoid unnecessary allocations in underlying watchers.
+ timer *time.Timer
+ // dispatching determines whether there is currently dispatching of
+ // any event in flight.
+ dispatching bool
+ // watchersBuffer is a list of watchers potentially interested in currently
+ // dispatched event.
+ watchersBuffer []*cacheWatcher
+ // blockedWatchers is a list of watchers whose buffer is currently full.
+ blockedWatchers []*cacheWatcher
+ // watchersToStop is a list of watchers that were supposed to be stopped
+ // during current dispatching, but stopping was deferred to the end of
+ // dispatching that event to avoid race with closing channels in watchers.
+ watchersToStop []*cacheWatcher
+ // Maintain a timeout queue to send the bookmark event before the watcher times out.
+ bookmarkWatchers *watcherBookmarkTimeBuckets
+ // watchBookmark feature-gate
+ watchBookmarkEnabled bool
+} 
+```
+
+watchCache的结构如下所示：
+
+```
+type watchCache struct {
+ sync.RWMutex //同步锁
+ cond *sync.Cond //条件变量
+ capacity int//历史滑动窗口容量
+ keyFunc func(runtime.Object) (string, error)//从storage中获取键值
+ getAttrsFunc func(runtime.Object) (labels.Set, fields.Set, bool, error)//获取一个对象的field和label信息
+ cache []watchCacheElement//循环队列缓存
+ startIndex int//循环队列的起始下标
+ endIndex int//循环队列的结束下标
+ store cache.Store//
+ resourceVersion uint64
+ onReplace func()
+ onEvent func(*watchCacheEvent)//在每次缓存中的数据发生Add/Update/Delete后都会调用该函数，来获取对象的之前版本的值
+ clock clock.Clock
+ versioner storage.Versioner
+}
+
+```
+cache里面存放的是所有操作事件，而store中存放的是当前最新的事件。
+4. cacheWatcher从watchCache中拿到从某个resourceVersion以来的所有数据，即initEvents，然后将数据放到input这个channel里面去，通过filter然后输出到result这个channel里面，返回数据到某个client。
+```
+type cacheWatcher struct {
+ sync.Mutex//同步锁
+ input chan *watchCacheEvent//输入管道,Apiserver都事件发生时都会通过广播的形式向input管道进行发送
+ result chan watch.Event//输出管道，输出到update管道中去
+ done chan struct{}
+ filter filterWithAttrsFunc//过滤器
+ stopped bool
+ forget func(bool)
+ versioner storage.Versioner
+}
+```
+
+
+
+
+
+
+
+
+
 
 
 
