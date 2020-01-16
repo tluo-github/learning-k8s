@@ -137,7 +137,7 @@ ReplicaSet 控制器的作用是监视 ReplicaSet 及其相关资源 Pod 的生�
 
 Scheduler 作为一个独立的组件运行在集群控制平面上，工作方式与其他 Controller 相同：监听事件并调谐状态。一旦 Scheduler 将 Pod 调度到某个节点上，该节点的 Kubelet 就会接管该 Pod 并开始部署。
 
-#### Kubelet
+#### 8. Kubelet
 
 在 Kubernetes 集群中，每个 Node 节点上都会启动一个 Kubelet 服务进程，该进程用于处理 Scheduler 下发到本节点的任务，管理 Pod 的生命周期。这意味着它将处理 Pod 与 Container Runtime 之间所有的转换逻辑，包括挂载卷、容器日志、垃圾回收以及其他重要事件。
 
@@ -148,6 +148,97 @@ Scheduler 作为一个独立的组件运行在集群控制平面上，工作方�
 * 如果 Pod 正在创建， Kubelet 就会暴露一些指标，可以用于在 Prometheus 中追踪 Pod 启动延时；
 * 然后，生成一个 PodStatus 对象，表示 Pod 当前阶段的状态。Pod 的 Phase 状态是 Pod 在其生命周期中的高度概括，包括 **Pending**、**Running**、**Succeeded**、**Failed** 和 **Unkown** 这几个值。状态的产生过程非常复杂，因此很有必要深入深挖一下：
    * 首先，串行执行一系列 PodSyncHandlers，每个处理器检查 Pod 是否应该运行在该节点上。当其中之一的处理器认为该 Pod 不应该运行在该节点上，则 Pod 的 Phase 值就会变成 PodFailed 并将从该节点被驱逐。例如，以 Job 为例，当一个 Pod 失败重试的时间超过了 activeDeadlineSeconds 设置的值，就会将该 Pod 从该节点驱逐出去
+   * 接下来，Pod 的 Phase 值由 init 容器和主容器状态共同决定。由于主容器尚未启动，容器被视为处于等待阶段，如果 Pod 中至少有一个容器处于等待阶段，则其 Phase 值为 Pending
+  * 最后，Pod 的 Condition 字段由 Pod 内所有容器状态决定。现在我们的容器还没有被容器运行时 (Container Runtime) 创建，所以，Kubelet 将 PodReady 的状态设置为 False
+
+* 生成 PodStatus 之后，Kubelet 就会将它发送到 Pod 的 status 管理器，该管理器的任务是通过 apiserver 异步更新 etcd 中的记录；
+* 接下来运行一系列 admit handlers 以确保该 Pod 具有正确的权限（包括强制执行 AppArmor profiles 和 NO_NEW_PRIVS），在该阶段被拒绝的 Pod 将永久处于 Pending 状态；
+* 如果 Kubelet 启动时指定了 cgroups-per-qos 参数，Kubelet 就会为该 Pod 创建 cgroup 并设置对应的资源限制。这是为了更好的 Pod 服务质量（QoS）；
+* 为 Pod 创建相应的数据目录，包括：
+  * Pod 目录 (通常是 /var/run/kubelet/pods/<podID>)
+  * Pod 的挂载卷目录 (<podDir>/volumes)
+  * Pod 的插件目录 (<podDir>/plugins)
+
+* 卷管理器会挂载 Spec.Volumes 中定义的相关数据卷，然后等待挂载成功；
+* 从 apiserver 中检索 Spec.ImagePullSecrets，然后将对应的 Secret 注入到容器中；
+* 最后，通过容器运行时 （Container Runtime） 启动容器（下面会详细描述）。
+
+#### 9. CRI 和 pause 容器 
+
+CRI 提供了 Kubelet 和特定容器运行时实现之间的抽象。通过 protocol buffers（一种更快的 JSON） 和 gRPC API（一种非常适合执行 Kubernetes 操作的API）进行通信。
+
+，当一个 Pod 首次启动时， Kubelet 调用 RunPodSandbox 远程过程命令。沙箱是描述一组容器的 CRI 术语，在 Kubernetes 中对应的是 Pod。所以在此容器运行时中，创建沙箱涉及创建 pause 容器。
+
+**pause** 容器像 Pod 中的所有其他容器的父级一样，因为它承载了工作负载容器最终将使用的许多 Pod 级资源。这些“资源”是 Linux Namespaces（IPC、Network、PID）。
+
+**pause** 容器提供了一种托管所有这些 Namespaces 的方法，并允许子容器共享它们。成为同一 Network Namespace 一部分的好处是同一个 Pod 中的容器可以使用 localhost 相互访问。
+
+**pause** 容器的第二个好处与 PID Namespace 有关。在这些 Namespace 中，进程形成一个分层树，顶部的“init” 进程负责“收获”僵尸进程。更多信息，请深入阅读：https://www.ianlewis.org/en/almighty-pause-container
+
+创建 **pause** 容器后，将开始检查磁盘状态然后启动主容器。
+
+#### 10. CNI 和 Pod 网络
+
+现在，我们的 Pod 有了基本的骨架：一个 pause 容器，它托管所有 Namespaces 以允许 Pod 间通信。但容器的网络如何运作以及建立的？
+
+当 Kubelet 为 Pod 设置网络时，它会将任务委托给 CNI (Container Network Interface) 插件，其运行方式与 Container Runtime Interface 类似。简而言之，CNI 是一种抽象，允许不同的网络提供商对容器使用不同的网络实现。
+
+Kubelet 通过 stdin 将 JSON 数据（配置文件位于 **/etc/cni/net.d** 中）传输到相关的 CNI 二进制文件（位于 **/opt/cni/bin**） 中与之交互。下面是 JSON 配置文件的一个简单示例 ：
+
+```
+{
+	"cniVersion": "0.3.1",
+	"name": "bridge",
+	"type": "bridge",
+	"bridge": "cnio0",
+	"isGateway": true,
+	"ipMasq": true,
+	"ipam":{
+		"type": "host-local",
+		"ranges":[{"subnet", "${POD_CIDR}"}],
+		"routes": [{"dst": "0.0.0.0.0/0"}]
+	}
+}
+```
+
+接下来会发生什么取决于 CNI 插件，这里我们以 bridge CNI 插件为例：
+
+* 该插件首先会在 Root Network Namespace（也就是宿主机的 Network Namespace） 中设置本地 Linux 网桥，以便为该主机上的所有容器提供网络服务；
+* 然后将一个网络接口 （veth 设备对的一端）插入到 pause 容器的 Network Namespace 中，并将另一端连接到网桥上。
+* 之后，为 pause 容器的网络接口分配一个 IP 并设置相应的路由，于是 Pod 就有了自己的 IP。IP 的分配是由 JSON 配置文件中指定的 IPAM Plugin 实现的；
+  * IPAM Plugin 的工作方式和 CNI 插件类似：通过二进制文件调用并具有标准化的接口，每一个 IPAM Plugin 都必须要确定容器网络接口的 IP、子网以及网关和路由，并将信息返回给 CNI 插件。最常见的 IPAM Plugin 称为 host-local，它从预定义的一组地址池为容器分配 IP 地址。它将相关信息保存在主机的文件系统中，从而确保了单个主机上每个容器 IP 地址的唯一性。
+* 对于 DNS， Kubelet 将为 CNI 插件指定 Kubernetes 集群内部 DNS 服务器 IP 地址，确保正确设置容器的 resolv.conf 文件。
+
+
+#### 11.  跨主机容器网络 
+
+到目前为止，我们已经描述了容器如何与宿主机进行通信，但跨主机之间的容器如何通信呢？
+
+通常情况下， Kubernetes 使用 Overlay 网络来进行跨主机容器通信，这是一种动态同步多个主机间路由的方法。一个较常用的 Overlay 网络插件是 flannel，它提供了跨节点的三层网络。
+
+flannel 不会管容器与宿主机之间的通信（这是 CNI 插件的职责），但它对主机间的流量传输负责。为此，它为主机选择一个子网并将其注册到 etcd，然后保留集群路由的本地表示，并将传出的数据包封装在 UDP 数据报中，确保它到达正确的主机。
+
+#### 12.启动容器
+
+所有的网络配置都已完成。还剩什么？真正启动工作负载容器！
+
+一旦 sanbox 完成初始化并处于 active 状态， Kubelet 将开始为其创建容器。首先启动 PodSpec 中定义的 Init Container，然后再启动主容器，具体过程如下：
+
+* 拉取容器的镜像。如果是私有仓库的镜像，就会使用 PodSpec 中指定的 Secret 来拉取该镜像；
+* 通过 CRI 创建容器。Kubelet 使用 PodSpec 中的信息填充了 ContainerConfig 数据结构（在其中定义了 command、image、labels、mounts、devices、environment variables 等），然后通过 protobufs 发送给 CRI。对于 Docker 来说，它会将这些信息反序列化并填充到自己的配置信息中，然后再发送给 Dockerd 守护进程。在这个过程中，它会将一些元数据（例如容器类型、日志路径、sandbox ID 等）添加到容器中；
+* 然后 Kubelet 将容器注册到 CPU 管理器，它通过使用 UpdateContainerResources CRI 方法给容器分配给本地节点上的 CPU 资源；
+* 最后容器真正启动；
+* 如果 Pod 中包含 Container Lifecycle Hooks，容器启动之后就会运行这些 Hooks。Hook 的类型包括两种：Exec（执行一段命令） 和 HTTP（发送 HTTP 请求）。如果 PostStart Hook 启动的时间过长、挂起或者失败，容器将永远不会变成 Running 状态。
+
+最后的最后，现在我们的集群上应该会运行三个容器，分布在一个或多个工作节点上。所有的网络、数据卷和秘钥都由 Kubelet 填充，并通过 CRI 接口添加到容器中，配置成功！
+
+引用:
+* http://wsfdl.com/kubernetes/2019/01/10/list_watch_in_k8s.html
+* https://github.com/bbbmj/what-happens-when-k8s
+
+
+
+
 
 
 
